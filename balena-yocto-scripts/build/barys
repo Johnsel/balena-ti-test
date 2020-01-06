@@ -1,0 +1,519 @@
+#!/bin/bash
+
+#
+# Build A Resin Yocto Script
+# --------------------------
+#
+# HARD ASSUMPTIONS
+# * This script is in a repository which should be a submodule of a balena-<board>
+#   repository
+# * Build will be created two directories behind the one where this script resides.
+# * Script ran as normal user.
+#
+# Signed-off-by: Theodor Gherzan <theodor@resin.io>
+# Signed-off-by: Andrei Gherzan <andrei@resin.io>
+#
+
+BARYSVERSION=1.4
+
+# Default values
+COMPRESS_TOOL="xz"
+BUILD_DIR=build
+REMOVEBUILD=no
+COMPRESS=no
+DEVELOPMENT_IMAGE=no
+SUPERVISOR_TAG=
+SHARED_DOWNLOADS=
+SHARED_SSTATE=
+DRY_RUN=no
+LOG=no
+RM_WORK=
+BUILD_HISTORY=no
+LOGFILE=`pwd`/`basename "$0"`.log
+MACHINES=
+BITBAKEARGS=
+EXIT_CODE=0
+SKIP_DISCONTINUED=no
+
+function help {
+    echo
+    echo -e "Options:"
+
+    echo -e "\t-h | --help"
+    echo -e "\t\t Print this message."
+
+    echo -e "\t-m | --machine"
+    echo -e "\t\t Build a machine supported by this layer."
+    echo -e "\t\t Default: build all machines supported by this layer."
+
+    echo -e "\t-k | --continue"
+    echo -e "\t\t Run bitbake with \"-k\" argument."
+    echo -e "\t\t From bitbake manual:"
+    echo -e "\t\t\t Continue as much as possible after an error. While the"
+    echo -e "\t\t\t target that failed and anything depending on it cannot"
+    echo -e "\t\t\t be built, as much as possible will be built before"
+    echo -e "\t\t\t stopping"
+
+    echo -e "\t-c | --compress"
+    echo -e "\t\t Run build with compress variable (RESIN_SDIMG_COMPRESSION)"
+    echo -e "\t\t using $COMPRESS_TOOL."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t-d | --development-image"
+    echo -e "\t\t Set images to include development tweaks."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t--bitbake-target"
+    echo -e "\t\t Force a specific bitbake target."
+    echo -e "\t\t Default: image specified in the device type json."
+
+    echo -e "\t-a | --additional-variable"
+    echo -e "\t\t Inject additional local.conf variables."
+    echo -e "\t\t The format of the arguments need to be VARIABLE=VALUE ."
+    echo -e "\t\t VALUE doesn't support white spaces."
+
+    echo -e "\t--supervisor-tag"
+    echo -e "\t\t Use a specific supervisor tag."
+    echo -e "\t\t Default: production."
+
+    echo -e "\t-r | --remove-build"
+    echo -e "\t\t Run a clean build by removing the build directory before"
+    echo -e "\t\t building."
+    echo -e "\t\t Build directory name is configurable with -b|--build-name."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t-b | --build-name"
+    echo -e "\t\t Set build directory name."
+    echo -e "\t\t If clean build was selected with -r|--remove-build this"
+    echo -e "\t\t directory will be removed."
+    echo -e "\t\t Default: build."
+
+    echo -e "\t--shared-downloads"
+    echo -e "\t\t Use a custom absolute path for DL_DIR."
+    echo -e "\t\t Default: don't have a custom path."
+
+    echo -e "\t--shared-sstate"
+    echo -e "\t\t Use a custom absolute path for SSTATE_DIR."
+    echo -e "\t\t Default: don't have a custom path."
+
+    echo -e "\t-l | --log"
+    echo -e "\t\t Log in "`basename "$0"`".log."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t-n | --dry-run"
+    echo -e "\t\t Don't run bitbake but only configure build as requested."
+    echo -e "\t\t Machine is ignored and will need to be modified accordingly"
+    echo -e "\t\t in local.conf file or using MACHINE=yyy in front of bitbake"
+    echo -e "\t\t commands."
+    echo -e "\t\t Be aware that with this flag the tool will only create and"
+    echo -e "\t\t configure the build directory. You will need to 'source' the"
+    echo -e "\t\t oe-init-build-env script from the poky submodule before being"
+    echo -e "\t\t able to run bitbake commands."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t--rm-work"
+    echo -e "\t\t Inherit rm_work in local.conf."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t--build-history"
+    echo -e "\t\t Enable build history."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t--skip-discontinued"
+    echo -e "\t\t Don't build device types that are discontinued."
+
+    echo -e "\t-i | --interactive"
+    echo -e "\t\t Run tool in interactive mode."
+    echo -e "\t\t Default: no."
+
+    echo -e "\t-v | --version"
+    echo -e "\t\t Print version"
+}
+
+function log {
+    # Address log levels
+    case $1 in
+        ERROR)
+            loglevel=ERROR
+            shift
+            ;;
+        WARN)
+            loglevel=WARNING
+            shift
+            ;;
+        *)
+            loglevel=LOG
+            ;;
+    esac
+    ENDTIME=$(date +%s)
+    if [ "z$LOG" == "zyes" ]; then
+        printf "[%09d%s%s\n" "$(($ENDTIME - $STARTTIME))" "][$loglevel]" "$1" | tee -a $LOGFILE
+    else
+        printf "[%09d%s%s\n" "$(($ENDTIME - $STARTTIME))" "][$loglevel]" "$1"
+    fi
+    if [ "$loglevel" == "ERROR" ]; then
+        exit 1
+    fi
+}
+
+function check_machine {
+    found=0
+    for mi in ${SUPPORTED_MACHINES}; do
+        if [ "$1" == "$mi" ]; then
+            found=1
+            break
+        fi
+    done
+}
+
+# Timer
+STARTTIME=$(date +%s)
+
+# Get the absolute script location
+pushd `dirname $0` > /dev/null 2>&1
+SCRIPTPATH=`pwd`
+popd > /dev/null 2>&1
+
+# Backup $@
+SCRIPT_ARGUMENTS=$@
+
+# generate .json(s) from all the available .coffee files
+$SCRIPTPATH/build-device-type-json.sh || log ERROR "Could not generate .json file(s)."
+
+# get all the device type .json files
+DEVICE_TYPES_JSONS=$(ls $SCRIPTPATH/../../*.json 2>/dev/null | grep -v package.json)
+
+if [ -z "${DEVICE_TYPES_JSONS}" ]; then
+    log ERROR "No available .json. Please check your git repository."
+fi
+
+# Get the list of the supported machines out of all the available machine json files
+# (we may have multiple json files describing different machines based on the same balena layers; i.e. imx6 fsl based machines)
+for json in ${DEVICE_TYPES_JSONS}; do
+    SUPPORTED_MACHINES="${SUPPORTED_MACHINES} `jq -r "[.yocto.machine] | sort | .[] | select(. != null)" ${json} 2>/dev/null`" || log ERROR "Please install the 'jq' package before running this script."
+done
+
+# Parse arguments
+while [[ $# -ge 1 ]]; do
+    i="$1"
+    case $i in
+        -h|--help)
+            help
+            exit 0
+            ;;
+        -m|--machine)
+            if [ -z "$2" ]; then
+                log ERROR "\"$1\" argument needs a value."
+            fi
+            check_machine $2
+            if [ $found -eq 0 ]; then
+                log ERROR "\"$2\" is not a supported machine."
+            else
+                MACHINES="$MACHINES $2"
+                shift
+            fi
+            ;;
+        -k|--continue)
+            BITBAKEARGS="$BITBAKEARGS -k"
+            ;;
+        -c|--compress)
+            COMPRESS=yes
+            ;;
+        -d|--development-image)
+            DEVELOPMENT_IMAGE=yes
+            ;;
+        --bitbake-target)
+            if [ -z "$2" ]; then
+                log ERROR "\"$1\" argument needs a value."
+            fi
+            BITBAKE_TARGET="$2"
+            shift
+            ;;
+        --supervisor-tag)
+            if [ -z "$2" ]; then
+                log ERROR "\"$1\" argument needs a value."
+            fi
+            SUPERVISOR_TAG=$2
+            shift
+            ;;
+        -r|--remove-build)
+            REMOVEBUILD=yes
+            ;;
+        -b|--build-name)
+            if [ -z "$2" ]; then
+                log ERROR "\"$1\" argument needs a value."
+            fi
+            BUILD_DIR=$2
+            shift
+            ;;
+        --shared-downloads)
+            # Argument needs to be non-empty and absolute path
+            if [ -z "$2" ] || [ "${2:0:1}" != "/" ]; then
+                log ERROR "\"$1\" argument is invalid. Argument needs to be a non-empty, absolute path."
+            fi
+            SHARED_DOWNLOADS=$2
+            shift
+            ;;
+        --shared-sstate)
+            # Argument needs to be non-empty and absolute path
+            if [ -z "$2" ] || [ "${2:0:1}" != "/" ]; then
+                log ERROR "\"$1\" argument is invalid. Argument needs to be a non-empty, absolute path."
+            fi
+            SHARED_SSTATE=$2
+            shift
+            ;;
+        -l|--log)
+            LOG=yes
+            ;;
+        -n|--dry-run)
+            DRY_RUN=yes
+            ;;
+        --rm-work)
+            RM_WORK=yes
+            ;;
+        --build-history)
+            BUILD_HISTORY=yes
+            ;;
+        -a|--additional-variable)
+            if [ -z "$2" ]; then
+                log ERROR "\"$1\" argument needs a value."
+            fi
+            if echo "$2" | grep -vq '^[A-Za-z0-9_-]*='; then
+                log ERROR "\"$2\" has the wrong argument format for \"$1\". Read help."
+            fi
+            ADDITIONAL_VARIABLES="$ADDITIONAL_VARIABLES $2"
+            shift
+            ;;
+        --skip-discontinued)
+            SKIP_DISCONTINUED=yes
+            ;;
+        -i|--interactive)
+            read -p "Select machines. Space separated or empty for all: " m
+            MACHINES=$m
+            for m in $MACHINES; do
+                check_machine $m
+                if [ $found -eq 0 ]; then
+                    log ERROR "\"$m\" is not a supported machine."
+                fi
+            done
+
+            read -p "Run bitbake with \"-k\"? yes/[no] " yn
+            case $yn in
+                [Yy]* ) BITBAKEARGS="$BITBAKEARGS -k";;
+            esac
+
+            read -p "Compress final images with $COMPRESS_TOOL? yes/[no] " yn
+            case $yn in
+                [Yy]* ) COMPRESS=yes;;
+            esac
+
+            read -p "Development image? yes/[no] " yn
+            case $yn in
+                [Yy]* ) DEVELOPMENT_IMAGE=yes;;
+            esac
+
+            read -p "Supervisor version? [$SUPERVISOR_TAG] " yn
+            if [ -n "$yn" ]; then
+                SUPERVISOR_TAG=$yn
+            fi
+
+            read -p "Remove build directory? yes/[no] " yn
+            case $yn in
+                [Yy]* ) REMOVEBUILD=yes;;
+            esac
+
+            read -p "Build name? [$BUILD_DIR] " yn
+            if [ -n "$yn" ]; then
+                BUILD_DIR=$yn
+            fi
+
+            read -p "Shared downloads directory? yes/[no] " yn
+            case $yn in
+                [Yy]* )
+                    read -p "Shared downloads path? " SHARED_DOWNLOADS
+                    if [ -z "$SHARED_DOWNLOADS" ] || [ "${SHARED_DOWNLOADS:0:1}" != "/" ]; then
+                        log ERROR "Provided path is invalid."
+                    fi
+                    ;;
+            esac
+
+            read -p "Shared sstate directory? yes/[no] " yn
+            case $yn in
+                [Yy]* )
+                    read -p "Shared sstate path? " SHARED_SSTATE
+                    if [ -z "$SHARED_SSTATE" ] || [ "${SHARED_SSTATE:0:1}" != "/" ]; then
+                        log ERROR "Provided path is invalid."
+                    fi
+                    ;;
+            esac
+
+            read -p "Generate log? yes/[no] " yn
+            case $yn in
+                [Yy]* ) LOG=yes;;
+            esac
+
+            read -p "Inherit rm_work? yes/[no] " yn
+            case $yn in
+                [Yy]* ) RM_WORK=yes;;
+            esac
+
+            read -p "Enable build history? yes/[no] " yn
+            case $yn in
+                [Yy]* ) BUILD_HISTORY=yes;;
+            esac
+
+            read -p "Dry run? yes/[no] " yn
+            case $yn in
+                [Yy]* ) DRY_RUN=yes;;
+            esac
+
+            # This is interactive so just abort arguments parsing
+            break
+            ;;
+        -v|--version )
+            echo $BARYSVERSION
+            exit 0
+            ;;
+        *)
+            log ERROR "Unrecognized option $1."
+            ;;
+    esac
+    shift
+done
+
+# LOGFILE init and header
+if [ "z$LOG" == "zyes" ]; then
+    echo "================"`basename "$0"`" HEADER START====================" > $LOGFILE
+    date >> $LOGFILE
+    echo "Script called from: "`pwd` >> $LOGFILE
+    echo "Script called as: $0 $SCRIPT_ARGUMENTS" >> $LOGFILE
+    echo "Selected machines: $MACHINES" >> $LOGFILE
+    echo "Selected bitbake arguments: $BITBAKEARGS" >> $LOGFILE
+    echo "Build directory name: $BUILD_DIR" >> $LOGFILE
+    echo "Remove build directory? $REMOVEBUILD" >> $LOGFILE
+    echo "Compressed image? $COMPRESS" >> $LOGFILE
+    echo "Shared downloads directory: $SHARED_DOWNLOADS" >> $LOGFILE
+    echo "Shared sstate directory: $SHARED_SSTATE" >> $LOGFILE
+    echo "Development image? $DEVELOPMENT_IMAGE" >> $LOGFILE
+    echo "Forced supervisor image tag: $SUPERVISOR_TAG" >> $LOGFILE
+    echo "Inherit rm_work? $RM_WORK" >> $LOGFILE
+    echo "Enable build history? $BUILD_HISTORY" >> $LOGFILE
+    echo "================"`basename "$0"`" HEADER STOP=====================" >> $LOGFILE
+fi
+
+if [ "x$REMOVEBUILD" == "xyes" ]; then
+    log "Removing old build in $SCRIPTPATH/../../$BUILD_DIR."
+    log "This might take a while ..."
+    rm -rf $SCRIPTPATH/../../$BUILD_DIR
+fi
+
+RESIN_MACHINE_LAYER=$(ls ${SCRIPTPATH}/../../layers/ | grep meta-balena-)
+
+# Configure build
+
+$SCRIPTPATH/generate-conf-notes.sh $SCRIPTPATH/../../layers/${RESIN_MACHINE_LAYER}/conf/ ${DEVICE_TYPES_JSONS}
+
+export TEMPLATECONF=${SCRIPTPATH}/../../layers/${RESIN_MACHINE_LAYER}/conf/samples
+source ${SCRIPTPATH}/../../layers/poky/oe-init-build-env ${SCRIPTPATH}/../../${BUILD_DIR}
+if [ "x$DEVELOPMENT_IMAGE" == "xyes" ]; then
+    sed -i "s/.*DEVELOPMENT_IMAGE =.*/DEVELOPMENT_IMAGE = \"1\"/g" conf/local.conf
+else
+    sed -i "s/.*DEVELOPMENT_IMAGE =.*/DEVELOPMENT_IMAGE = \"0\"/g" conf/local.conf
+    # Always activate resinhup bundles in production builds
+    sed -i "s/.*RESINHUP ?=.*/RESINHUP ?= \"yes\"/g" conf/local.conf
+fi
+if [ "x$COMPRESS" == "xyes" ]; then
+    sed -i "s/.*RESIN_RAW_IMG_COMPRESSION ?=.*/RESIN_RAW_IMG_COMPRESSION ?= \"${COMPRESS_TOOL}\"/g" conf/local.conf
+fi
+if [ "x$RM_WORK" == "xyes" ]; then
+    sed -i "s/.*INHERIT += \"rm_work\".*/INHERIT += \"rm_work\"/g" conf/local.conf
+fi
+if [ -n "$SHARED_DOWNLOADS" ]; then
+    sed -i "s#.*DL_DIR ?=.*#DL_DIR ?= \"$SHARED_DOWNLOADS\"#g" conf/local.conf
+fi
+if [ -n "$SHARED_SSTATE" ]; then
+    sed -i "s#.*SSTATE_DIR ?=.*#SSTATE_DIR ?= \"$SHARED_SSTATE\"#g" conf/local.conf
+fi
+if [ -n "$SUPERVISOR_TAG" ]; then
+    grep -q 'SUPERVISOR_TAG ?=' conf/local.conf \
+    && sed -i "s/.*SUPERVISOR_TAG ?=.*/SUPERVISOR_TAG ?= \"$SUPERVISOR_TAG\"/g" conf/local.conf \
+    || echo "SUPERVISOR_TAG ?= $SUPERVISOR_TAG" >> conf/local.conf
+fi
+
+perl -i -pe 'BEGIN {$/ = undef}; s/^\n# Barys: Additional variables.*//sm' conf/local.conf
+echo -e "\n# Barys: Additional variables" >> conf/local.conf
+if [ "x$BUILD_HISTORY" == "xyes" ]; then
+    echo 'INHERIT += "buildhistory"' >> conf/local.conf
+    echo 'BUILDHISTORY_COMMIT = "1"' >>conf/local.conf
+fi
+for pair in $ADDITIONAL_VARIABLES; do
+    variable=$(echo "$pair" | awk -F= '{print $1}')
+    value=$(echo "$pair" | awk -F= '{print $2}')
+    echo "$variable=\"$value\"" >> conf/local.conf
+done
+
+log "BalenaOS build initialized in directory: $BUILD_DIR."
+
+# Start builds
+if [ "$DRY_RUN" == "yes" ]; then
+  log "Dry run requested so don't start builds."
+  log WARN "Don't forget to setup build MACHINE as this script ignores it in dry run mode."
+else
+  if [ -z "$MACHINES" ]; then
+      ITERATOR_MACHINES="${SUPPORTED_MACHINES}"
+  else
+      ITERATOR_MACHINES="$MACHINES"
+  fi
+  for machine in $ITERATOR_MACHINES; do
+      for json in ${DEVICE_TYPES_JSONS}; do
+        MACHINE_IN_JSON=`jq -r '.yocto.machine' $json`
+        if [[ "$machine" != "${MACHINE_IN_JSON}" ]]; then
+          continue
+        fi
+        if [ -z "$BITBAKE_TARGET" ]; then
+            IMAGE=`jq -r '.yocto | select(.machine == '\"${machine}\"').image' $json`
+        else
+            IMAGE="$BITBAKE_TARGET"
+        fi
+        if [ -z "$IMAGE" ] || [ "z$IMAGE" == "znull" ]; then
+          log ERROR "No target image defined for $machine."
+        fi
+        if [ "$SKIP_DISCONTINUED" = "yes" ] && [ "$(jq -r '.state' "$json")" = "DISCONTINUED" ]; then
+            log WARN "Skip discontinued requested: build for $machine skipped."
+            continue
+        fi
+        log "Run build for $machine: MACHINE=$machine bitbake $IMAGE $BITBAKEARGS"
+        log "This might take a while ..."
+        env MACHINE=$machine bitbake ${IMAGE} $BITBAKEARGS
+        if [ $? -eq 0 ]; then
+          log "Build for $machine suceeded."
+        else
+          log "Build for $machine failed. Check failed log in $BUILD_DIR/tmp/log/cooker/$machine ."
+          EXIT_CODE=2 # Fail at the end
+        fi
+      done
+  done
+
+  for machine in $ITERATOR_MACHINES; do
+    for json in ${DEVICE_TYPES_JSONS}; do
+        MACHINE_IN_JSON=`jq -r '.yocto.machine' $json`
+        if [[ "$machine" != "${MACHINE_IN_JSON}" ]]; then
+          continue
+        fi
+        [ -n "$BITBAKE_TARGET" ] && continue
+        IMAGE=`jq -r '.yocto | select(.machine == '\"${machine}\"').image' $json`
+        FSTYPE=`jq -r '.yocto | select(.machine == '\"${machine}\"').fstype' $json`
+        if [ -z "$IMAGE" ] || [ -z "$FSTYPE" ] || [ "z$IMAGE" == "znull" ] || [ "z$FSTYPE" == "znull" ]; then
+          log WARN "No target image and/or fstype defined for $machine. This is normal for generic builds which don't generate raw images."
+        else
+            log "If build for $machine succeeded, final image should have been generated here:"
+            log "   $BUILD_DIR/tmp/deploy/images/$machine/$IMAGE-$machine.$FSTYPE"
+        fi
+    done
+  done
+fi
+
+log "Done."
+echo "===================="`basename "$0"`" STOP========================" >> $LOGFILE
+
+exit $EXIT_CODE

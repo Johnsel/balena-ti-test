@@ -1,0 +1,30 @@
+From 65b03b136110a7b172446d87cffe2226968d582c Mon Sep 17 00:00:00 2001
+From: Andrei Gherzan <andrei@balena.io>
+Date: Wed, 15 May 2019 19:05:08 +0100
+Subject: [PATCH] env_default.h: Add support for OS_KERNEL_CMDLINE
+
+The uboot integration runs set_os_cmdline which sets os_cmdline. Use
+this to pass the cmdline to uboot.
+
+Upstream-status: Inappropriate [Configuration]
+Signed-off-by: Andrei Gherzan <andrei@balena.io>
+
+---
+ include/environment/ti/mmc.h | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/include/environment/ti/mmc.h b/include/environment/ti/mmc.h
+index 1bf2668a16..ea64a6c0fe 100644
+--- a/include/environment/ti/mmc.h
++++ b/include/environment/ti/mmc.h
+@@ -19,6 +19,7 @@
+ 		"root=PARTUUID=${uuid} ro " \
+ 		"rootfstype=${mmcrootfstype} " \
+ 		"${uboot_detected_capes} " \
++		"${os_cmdline} " \
+ 		"${cmdline}\0" \
+ 	"args_mmc_old=setenv bootargs console=${console} " \
+ 		"${optargs} " \
+-- 
+2.17.1
+
