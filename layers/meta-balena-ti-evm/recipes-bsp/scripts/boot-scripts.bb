@@ -33,4 +33,4 @@ do_install () {
 
 SYSTEMD_SERVICE_${PN} = "usb-eth-startup.service"
 
-COMPATIBLE_MACHINE = "ti-evm"
+COMPATIBLE_MACHINE = "beaglebone"

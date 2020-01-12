@@ -4,6 +4,11 @@ IMAGE_FSTYPES_append_beaglebone-pocket = " resinos-img"
 IMAGE_FSTYPES_append_beagleboard-xm = " resinos-img"
 
 # Customize resinos-img
+RESIN_BOOT_PARTITION_FILES_ti-evm = " \
+    MLO: \
+    u-boot.img: \
+    "
+
 RESIN_BOOT_PARTITION_FILES_beaglebone = " \
     MLO: \
     u-boot.img: \

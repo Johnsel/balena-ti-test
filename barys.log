@@ -1,5 +1,26 @@
-====================barys STOP========================
-====================barys STOP========================
+================barys HEADER START====================
+Sat Jan 11 22:35:46 UTC 2020
+Script called from: /home/ubuntu/balena/balena-ti-test
+Script called as: ./balena-yocto-scripts/build/barys -d -l
+Selected machines: 
+Selected bitbake arguments: 
+Build directory name: build
+Remove build directory? no
+Compressed image? no
+Shared downloads directory: 
+Shared sstate directory: 
+Development image? yes
+Forced supervisor image tag: 
+Inherit rm_work? 
+Enable build history? no
+================barys HEADER STOP=====================
+[000000001][LOG]BalenaOS build initialized in directory: build.
+[000000001][LOG]Run build for ti-evm: MACHINE=ti-evm bitbake resin-image 
+[000000001][LOG]This might take a while ...
+[000000010][LOG]Build for ti-evm suceeded.
+[000000010][LOG]If build for ti-evm succeeded, final image should have been generated here:
+[000000010][LOG]   build/tmp/deploy/images/ti-evm/resin-image-ti-evm.resinos-img
+[000000010][LOG]Done.
 ====================barys STOP========================
 ====================barys STOP========================
 ====================barys STOP========================
